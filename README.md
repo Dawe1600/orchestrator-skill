@@ -2,9 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Herdr](https://img.shields.io/badge/Terminal-Herdr-0ea5e9)](https://herdr.dev)
-[![Agent Skills](https://img.shields.io/badge/Skills-Matt%20Pocock%20Workflow-10b981)](https://github.com/Dawe1600/orchestrator-skill)
+[![Agent Skills](https://img.shields.io/badge/Skills-Matt%20Pocock%20Workflow-10b981)](https://github.com/mattpocock/skills)
 
-A non-blocking dispatcher skill for **Herdr** that distributes pre-prepared tickets evenly across parallel AI coding agents (`agy`, `claude`, `codex`, `gemini`) running **Matt Pocock's `implement` workflow** inside isolated Git worktrees.
+A non-blocking dispatcher skill for **Herdr** that distributes pre-prepared tickets evenly across parallel AI coding agents (`agy`, `claude`, `codex`, `gemini`) running **[Matt Pocock's `implement` workflow](https://github.com/mattpocock/skills)** inside isolated Git worktrees.
 
 > Forked from [olivieropinotti/orchestrator-skill](https://github.com/olivieropinotti/orchestrator-skill) and rebuilt around `herdr worktree`, `herdr agent`, dependency-aware batching, and clean context resets between tickets.
 
@@ -35,7 +35,7 @@ flowchart LR
 
 - **Herdr** (`HERDR_ENV=1` in the main session) with at least one supported agent CLI installed (`agy` by default, or `claude`, `codex`, `gemini`, etc.).
 - Repository prepared with **`setup-matt-pocock-skills`** (`docs/agents/issue-tracker.md` present) and pre-created tickets.
-- Matt Pocock's core engineering skills installed (`implement`, `tdd`, `code-review`, `pr`).
+- [Matt Pocock's engineering skills](https://github.com/mattpocock/skills) installed (`implement`, `tdd`, `code-review`, `pr`).
 
 ---
 
