@@ -60,9 +60,12 @@ Each active ticket runs in its own Herdr worktree and branch so agents never col
    Parse `.result.workspace` (workspace ID) and `.result.root_pane` (pane ID) from the JSON output. Never guess IDs.
 2. **Start the agent in that pane:**
    Name the agent `impl-<nr>` (lowercase `[a-z][a-z0-9_-]{0,31}`):
+   - Pass any user-requested model or effort after `--` (for `agy`, check exact IDs with `agy models`, e.g. `-- --model gemini-4-hydrogen-medium --effort medium`).
+   - In isolated worktrees, pass autonomous execution flags by default unless the user opts out (e.g. `--mode auto` or `--dangerously-skip-permissions` for `agy` / `claude`):
    ```bash
-   herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000
+   herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000 -- --mode auto --model <model-id> --effort <effort>
    ```
+   - **Auto-accept worktree folder trust:** If `herdr agent start` returns `agent_not_ready`, inspect `herdr agent read "impl-<nr>" --source visible --lines 30`. If it shows the folder-trust prompt (`Do you trust the contents of this project?`) for the worktree you just created from this trusted repository, accept it automatically (`herdr agent send-keys "impl-<nr>" enter`) and wait until `impl-<nr>` becomes `idle` before sending the brief.
 3. **Send the brief via `herdr agent prompt` (no `--wait`) and start a background watcher:**
    ```bash
    herdr agent prompt "impl-<nr>" "<brief>"
