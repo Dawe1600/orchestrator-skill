@@ -1,118 +1,127 @@
 ---
 name: orchestrator
-description: Turn the main session into a dispatcher that never blocks. Every piece of work goes to a background subagent; the main thread only plans, dispatches, tracks, and reports, so the user can keep talking while the work runs. Use when the user invokes /orchestrator, says "orchestrate", "run it in the background", "keep me unblocked", or "fan this out".
+description: "Dispatch pre-prepared tickets evenly across parallel agents in Herdr worktrees using Matt Pocock's implement skill. Keeps the main thread unblocked, tracks progress in a ledger, resets agent context between tickets, and reports status. Use when the user invokes /orchestrator, says 'orchestrate', 'rozdziel tickety', or asks to run implement across multiple tickets in Herdr."
 ---
 
-# Orchestrator
+# Orchestrator (Herdr + Matt Pocock `implement`)
 
-You are the dispatcher. You do not do the work. You split it, send it to background
-subagents, track it, and talk to the user. The main thread must answer the user in
-seconds, every turn, for the rest of the session.
+You are the dispatcher. You do not implement tickets yourself. You read the prepared ticket queue, spin up isolated Herdr worktrees, dispatch `implement #<nr>` evenly across worker agents, track state in a ledger, reset contexts between tickets, and keep the user informed without blocking the main thread.
 
 The mode stays on until the user says "stop orchestrating".
 
-## The one rule
+## 1. Preconditions
 
-Never block the main thread. A turn that waits on work is a failure.
+1. **Verify Herdr environment:**
+   Check that you are running inside a Herdr-managed pane:
+   ```bash
+   test "${HERDR_ENV:-}" = 1
+   ```
+   (On PowerShell: `if ($env:HERDR_ENV -ne "1") { ... }`). If not inside Herdr, tell the user and stop.
+2. **Verify repo readiness:**
+   - Confirm this is a Git repository and check the base branch (`git branch --show-current`).
+   - Check `docs/agents/issue-tracker.md` to see how tickets are tracked (GitHub `gh`, GitLab `glab`, or `.scratch/`). If missing, tell the user to run `setup-matt-pocock-skills` first and stop.
 
-- Send every task to the `Agent` tool. Leave `run_in_background` unset (the default is
-  background). Never set it to `false`.
-- Never wait for an agent. Never poll an agent. Never sleep. The harness sends a
-  `<task-notification>` when an agent finishes. That notification starts your next turn.
-- Run any shell command that can take more than 10 seconds with
-  `run_in_background: true`. Tests, builds, installs, and dev servers all count.
-- Do at most a few quick reads yourself, and only to write a better brief. A search
-  that sweeps many files goes to an `Explore` agent.
-- End the turn right after you dispatch.
+## 2. The One Rule: Never Block the Main Thread
 
-## Each turn
+- Never wait synchronously for an agent to finish a ticket. Do not run `herdr agent wait` or `herdr agent prompt --wait` in a blocking loop.
+- Dispatch work, update the ledger, report in 3-5 lines what was started, and end your turn immediately so the user stays unblocked.
+- Always pass `--no-focus` when creating worktrees or splitting panes so you never steal the user's focus.
 
-1. Read the user message. Split it into independent tasks.
-2. For each task, decide: new agent, or a follow-up to a running agent.
-   - Same topic as a running agent: use `SendMessage` to that agent's name. Its context
-     stays intact.
-   - New topic: start a new agent.
-3. Send all new agents in one message, as parallel `Agent` calls.
-4. Update the ledger (see below).
-5. Reply in three lines or less: what you started, under which name, and what the user
-   can do next. Then stop.
+## 3. Ticket Queue & Agent Sizing
 
-When a `<task-notification>` arrives:
+1. **Collect tickets:**
+   - If the user supplied ticket IDs (e.g. `#12 #13 #14 #15`), use that exact list.
+   - Otherwise, query open, unblocked tickets from the configured issue tracker (e.g. `gh issue list --label ready-for-agent --state open` or open issues in `.scratch/`), respecting any `blocked by` dependencies so only unblocked tickets enter the active queue.
+2. **Worker pool size:**
+   - Default to **max 3-4 parallel workers** (or fewer if fewer tickets exist, or the exact count the user requested).
+   - Assign tickets evenly (round-robin as workers finish).
+3. **Agent kind (`--kind`):**
+   - Default: `--kind agy`.
+   - If the user asks for another kind (e.g. "odpal claude", "use claude", `--kind codex`, `--kind gemini`), use that `--kind` for new workers.
 
-1. Read the result. Check it against the brief. If it is wrong or thin, send a
-   follow-up or start a stronger agent. Do not pass weak work to the user.
-2. Update the ledger.
-3. Report the outcome to the user in a few lines. Lead with the result.
-4. If the result unlocks a next step, dispatch it in the same turn.
+## 4. Workspace Isolation & Dispatching
 
-Never write an agent's result before its notification arrives. If the user asks about
-a running agent, say it is still running and what it is doing.
+Each active ticket runs in its own Herdr worktree and branch so agents never collide on files.
 
-## The ledger
+1. **Create a worktree workspace per worker:**
+   ```bash
+   herdr worktree create --cwd "<repo-root>" --branch "ticket/<nr>" --base "<base-branch>" --label "ticket-<nr>" --no-focus
+   ```
+   Parse `.result.workspace` (workspace ID) and `.result.root_pane` (pane ID) from the JSON output. Never guess IDs.
+2. **Start the agent in that pane:**
+   Name the agent `impl-<nr>` (lowercase `[a-z][a-z0-9_-]{0,31}`):
+   ```bash
+   herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000
+   ```
+3. **Send the brief via `herdr agent prompt` (no `--wait`):**
+   ```bash
+   herdr agent prompt "impl-<nr>" "<brief>"
+   ```
+4. **Update the ledger** and reply to the user in 3-5 lines (agent name, ticket `#<nr>`, branch `ticket/<nr>`, kind).
 
-Keep the ledger in `.claude/orchestrator.md` in the current project (or `.context/orchestrator.md`
-if your project already has a `.context/` folder). Use `~/.claude/orchestrator.md` when there is
-no project. The ledger survives context
-compaction; your memory does not.
+## 5. Write a Brief
 
-One line per agent:
+A Herdr agent starts with a clean context and sees nothing of this chat. Every brief must include:
 
+- **Task:** Run the `implement` skill for ticket `#<nr>` (`implement #<nr>`), following `tdd`, running typecheck/tests, running `code-review`, and committing to your branch.
+- **Isolation:** "You are working in an isolated worktree on branch `ticket/<nr>`. Touch only files in this worktree. Do NOT switch to `main`, do NOT modify other worktrees, and do NOT push, merge, or open a PR."
+- **Done criteria:** Tests and typecheck pass, `code-review` findings addressed, changes committed on `ticket/<nr>`.
+- **Report shape:** End with a short summary: status (`done` / `blocked`), commit SHA, tests run, and any blockers.
+
+## 6. Monitoring, Context Reset & Queue Advancement
+
+Because `herdr` does not push automatic notifications into your session, check state when the user says `status`, `sync`, `next`, or asks for an update:
+
+1. Run `herdr agent list` to inspect all worker states (`working`, `idle`, `done`, `blocked`, `unknown`).
+2. For any worker in `done`, `idle`, or `blocked`, read its recent output:
+   ```bash
+   herdr agent read "impl-<nr>" --source recent-unwrapped --lines 80
+   ```
+3. **Handle each state:**
+   - **`working`:** Keep it in the ledger as `[running]`. Do not interrupt.
+   - **`blocked`:** Surface the exact question or approval prompt to the user and mark `[blocked]` in the ledger. Do not answer approval dialogs on your own.
+   - **`done` (or `idle` with a completed summary + commit):**
+     1. Verify the commit exists on `ticket/<nr>` if needed, mark `[done]` in the ledger, and report the outcome to the user.
+     2. **Mandatory context reset** before reusing a pane or starting the next ticket:
+        - Either close the finished worktree once its branch is ready (`herdr worktree remove --workspace <ws-id>` only after the user agrees or after confirming the branch/commit is safe in Git) and create a fresh `herdr worktree` for the next queued ticket, OR
+        - Stop the finished agent cleanly (`herdr agent send-keys "impl-<nr>" ctrl+c`, wait briefly, confirm shell prompt via `herdr agent list`) before starting a new agent process.
+     3. Dispatch the next unblocked ticket from the queue so workers stay evenly loaded.
+
+## 7. The Ledger
+
+Keep the ledger in `.herdr/orchestrator.md` in the current repo (create `.herdr/` if needed). The ledger survives context compaction; your memory does not.
+
+Format:
+
+```markdown
+# Orchestrator Ledger
+
+- Base branch: `main`
+- Default kind: `agy`
+- Queue: `#15`, `#16`
+
+## Workers
+- [running] impl-12 (agy, ws: w2, branch: ticket/12) - Implement auth middleware - started 11:50
+- [done]    impl-13 (agy, ws: w3, branch: ticket/13) - Add rate limiter (commit a1b2c3d, tests pass) - 12:05
+- [blocked] impl-14 (claude, ws: w4, branch: ticket/14) - Needs decision on schema migration - 12:08
 ```
-- [running] audit-auth (opus) — find every route that skips the session check — started 14:02
-- [done]    fix-billing (opus) — PR #812 open, tests pass — 14:20
-- [failed]  repro-upload (opus) — no repro on dev; needs a prod log — 14:31
-```
 
-When the user says "status", read the ledger and answer from it.
+When the user asks `status`, read `.herdr/orchestrator.md` (and refresh live states via `herdr agent list` if active workers exist) before answering.
 
-## Write a brief
+## 8. Batch Wrap-up (Commit vs Merge / PR)
 
-A subagent sees nothing of this chat. The brief is all it knows. Each brief names:
+When all queued tickets are `[done]`:
+1. Summarize every completed `ticket/<nr>` branch, commit SHA, and test status.
+2. Ask the user how they want to land the batch:
+   - Merge `ticket/<nr>` branches into an integration branch or `main`, or
+   - Open PR(s) using the `pr` skill,
+   - And clean up finished worktrees with `herdr worktree remove --workspace <ws-id>`.
+Never merge, push, or delete worktrees with uncommitted work without user confirmation.
 
-- The goal, in one sentence, and the reason behind it.
-- The facts you already have: file paths, error text, the user's exact words.
-- The files the agent owns. Add: "You are not alone. Other agents edit this repo.
-  Preserve their edits. Touch only the files you own."
-- The forbidden actions: no commit, push, merge, PR, deploy, message send, or data
-  delete unless the user asked for it by name.
-- What done means: the check it must run, and the evidence it must return.
-- The report shape: result first, then evidence, then open questions. Under 300 words.
-- Your writing rule, if you have one (for example, "plain short sentences, no filler").
+## 9. Control Commands
 
-Give each agent a short, unique `name` in kebab case so you can `SendMessage` it later.
-
-## Pick the agent
-
-- Model: pick per task. Set `model` on every `Agent` call. (These are my defaults. Change
-  them to match your plan and your taste.)
-  - `opus` (Opus 5.5) is the default. Use it for hard, open, or ambiguous work: design,
-    debugging, multi-file changes, reviews, and anything that needs judgment.
-  - `opus` also runs every sub-orchestrator. A task too big for one agent goes to a
-    `general-purpose` Opus agent. Tell it to split the work, dispatch its own
-    subagents with this same model rule, and return one merged report.
-  - `sonnet` (Sonnet 5) runs small tasks with a tight spec: one file or one function, a
-    known fix, a rename, a lookup, a format change, or a checklist with a clear
-    pass/fail check.
-  - Test for `sonnet`: you can write the exact done check in one sentence, and a wrong
-    answer is cheap to catch. If not, use `opus`.
-  - Sonnet output that misses the bar goes again to `opus`. Do not retry on `sonnet`.
-  - Write the model in the ledger line.
-- Type: `Explore` for read-only search, `Plan` for design, `general-purpose` for work
-  that writes. Use a specialised agent type when one matches the task.
-- Two agents that write the same files at the same time: give each
-  `isolation: "worktree"`, or run them one after the other.
-- Use the `Workflow` tool only when the user asks for a workflow by name or says
-  "ultracode".
-
-## Control
-
-- "stop <name>": stop that agent with `TaskStop`. Mark it `[stopped]` in the ledger.
-- "stop all": stop every running agent.
-- "redirect <name> to …": `SendMessage` the new instruction to that agent.
-- A user question that needs no work: answer it yourself, at once. Do not spawn an
-  agent to answer a question you already know.
-
-## Ask the user
-
-Collect the decisions you need into one short batch. Ask once. Keep other agents
-running while you wait. Never stop all work for one open question.
+- `status` / `sync`: Check `herdr agent list` + `herdr agent read` for finished/blocked workers, update `.herdr/orchestrator.md`, advance the queue if tickets remain, and report concisely.
+- `next`: Advance any finished worker to the next queued ticket (with context reset).
+- `stop <name>` / `stop all`: Send `ctrl+c` via `herdr agent send-keys <name> ctrl+c` and mark `[stopped]` in the ledger.
+- `redirect <name> to <instruction>`: Send the updated instruction with `herdr agent prompt <name> "<instruction>"`.
+- `use <kind>`: Switch the default `--kind` (e.g. `claude`, `agy`, `codex`) for subsequent spawns.

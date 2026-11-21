@@ -1,33 +1,29 @@
-# orchestrator
+# orchestrator (Herdr + Matt Pocock `implement`)
 
-[![skills.sh](https://skills.sh/b/olivieropinotti/orchestrator-skill)](https://skills.sh/olivieropinotti/orchestrator-skill)
-
-A Claude Code skill that turns your main session into a dispatcher that never blocks.
-
-Every task goes to a background subagent. The main session only plans, dispatches, tracks
-and reports, so you can keep talking while 3-5 agents work. A small ledger file
-(`.claude/orchestrator.md`) tracks every agent and survives context compaction.
-
-## Install
-
-```bash
-npx skills add olivieropinotti/orchestrator-skill
-```
-
-Then type `/orchestrator` in Claude Code. Say "stop orchestrating" to turn it off.
+Forked from [olivieropinotti/orchestrator-skill](https://github.com/olivieropinotti/orchestrator-skill) and adapted for **Herdr** (`herdr` CLI) and **Matt Pocock's engineering skills** (`implement`).
 
 ## What it does
 
-- Splits each message into independent tasks and dispatches them in parallel.
-- Sends follow-ups to the agent already on that topic, so its context stays intact.
-- Writes a full brief for every agent: goal, facts, files it owns, what it must not do,
-  and what "done" means.
-- Picks the model per task: Opus for judgment, Sonnet for tight, checkable tasks.
-- Answers "status" from the ledger.
+- Turns the main session into a non-blocking dispatcher for pre-prepared tickets (GitHub/GitLab/local `.scratch/`).
+- Isolates each parallel worker in its own `herdr worktree` (`ticket/<nr>` branch) with `--no-focus`.
+- Runs `implement #<nr>` on each worker (`tdd`, typecheck/tests, `code-review`, commit on its own branch).
+- Uses `--kind agy` by default, or any supported Herdr agent kind (`claude`, `codex`, `gemini`, etc.) on request.
+- Tracks active workers, branches, and queued tickets in `.herdr/orchestrator.md`.
+- Resets agent context between tickets and asks before merging, pushing, or opening PRs (with `pr`).
+
+## Install
+
+Copy `skills/orchestrator/SKILL.md` into your global skills directory (for example `~/.gemini/config/skills/orchestrator/SKILL.md` or `~/.claude/skills/orchestrator/SKILL.md`), or install via `skills`:
+
+```bash
+npx skills add Dawe1600/orchestrator-skill
+```
 
 ## Commands
 
-- `status`: list every agent and its state
+- `status` / `sync`: refresh worker states from `herdr agent list`, update `.herdr/orchestrator.md`, and advance finished workers to the next queued ticket
+- `next`: assign the next queued ticket to idle/finished workers (with fresh context)
+- `use <kind>`: switch default `--kind` (e.g. `claude`, `agy`)
 - `stop <name>` / `stop all`
 - `redirect <name> to ...`
 
