@@ -26,8 +26,8 @@ flowchart LR
 2. **Respects `blocked by` dependencies:** only unblocked tickets enter the active queue; blocked ones wait in the ledger.
 3. **Creates an integration branch** (`orchestrator/batch`) and spawns up to **3-4 parallel workers**, each in its own `herdr worktree` (`ticket/<nr>`) with `--no-focus`.
 4. **Runs `implement #<nr>`** on every worker (`tdd`, typecheck/tests, `code-review`, local commit on `ticket/<nr>`).
-5. **Tracks state in `.herdr/orchestrator.md`** and returns control immediately so your main session never blocks.
-6. **Merges finished blockers** into `orchestrator/batch`, **resets worker contexts** (`ctrl+c`), and **dispatches newly unblocked tickets** in parallel.
+5. **Tracks state in `.herdr/orchestrator.md`** and attaches a non-blocking background `herdr agent wait` watcher per worker so your main session stays responsive and wakes up automatically when a ticket finishes.
+6. **Merges finished blockers** into `orchestrator/batch`, **closes completed issues** on the tracker (`gh issue close`), **resets worker contexts** (`ctrl+c`), and **dispatches newly unblocked tickets** in parallel.
 
 ---
 

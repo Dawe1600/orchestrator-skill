@@ -23,8 +23,12 @@ The mode stays on until the user says "stop orchestrating".
 
 ## 2. The One Rule: Never Block the Main Thread
 
-- Never wait synchronously for an agent to finish a ticket. Do not run `herdr agent wait` or `herdr agent prompt --wait` in a blocking loop.
-- Dispatch work, update the ledger, report in 3-5 lines what was started, and end your turn immediately so the user stays unblocked.
+- Never wait synchronously for an agent to finish a ticket. Never run a blocking foreground `herdr agent wait` or `herdr agent prompt --wait` that stalls your turn.
+- Instead, after dispatching each worker with `herdr agent prompt` (no `--wait`), launch a **background watcher** (`run_in_background: true` in Claude Code / `WaitMsBeforeAsync: 500` in Antigravity) for that worker:
+  - Bash: `herdr agent wait "impl-<nr>" --until working --timeout 15000 >/dev/null 2>&1; herdr agent wait "impl-<nr>"`
+  - PowerShell: `herdr agent wait "impl-<nr>" --until working --timeout 15000 | Out-Null; herdr agent wait "impl-<nr>"`
+- This background command wakes you up automatically the instant the worker finishes (`done`/`idle`) or hits a question (`blocked`), while keeping your main thread free so the user can keep talking to you.
+- Update the ledger, report in 3-5 lines what was started, and end your turn immediately after dispatching.
 - Always pass `--no-focus` when creating worktrees or splitting panes so you never steal the user's focus.
 
 ## 3. Ticket Queue, Dependencies & Agent Sizing
@@ -59,10 +63,11 @@ Each active ticket runs in its own Herdr worktree and branch so agents never col
    ```bash
    herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000
    ```
-3. **Send the brief via `herdr agent prompt` (no `--wait`):**
+3. **Send the brief via `herdr agent prompt` (no `--wait`) and start a background watcher:**
    ```bash
    herdr agent prompt "impl-<nr>" "<brief>"
    ```
+   Then immediately start the background `herdr agent wait` watcher (Section 2) so you are notified automatically when `impl-<nr>` settles.
 4. **Update the ledger** and reply to the user in 3-5 lines (agent name, ticket `#<nr>`, branch `ticket/<nr>`, kind).
 
 ## 5. Write a Brief
@@ -74,11 +79,11 @@ A Herdr agent starts with a clean context and sees nothing of this chat. Every b
 - **Done criteria:** Tests and typecheck pass, `code-review` findings addressed, changes committed on `ticket/<nr>`.
 - **Report shape:** End with a short summary: status (`done` / `blocked`), commit SHA, tests run, and any blockers.
 
-## 6. Monitoring, Context Reset & Queue Advancement
+## 6. Monitoring, Closing Issues, Context Reset & Queue Advancement
 
-Because `herdr` does not push automatic notifications into your session, check state when the user says `status`, `sync`, `next`, or asks for an update:
+When a background `herdr agent wait` watcher finishes (or when the user says `status`, `sync`, or `next`):
 
-1. Run `herdr agent list` to inspect all worker states (`working`, `idle`, `done`, `blocked`, `unknown`).
+1. Run `herdr agent list` to inspect live worker states (`working`, `idle`, `done`, `blocked`, `unknown`).
 2. For any worker in `done`, `idle`, or `blocked`, read its recent output:
    ```bash
    herdr agent read "impl-<nr>" --source recent-unwrapped --lines 80
@@ -89,7 +94,8 @@ Because `herdr` does not push automatic notifications into your session, check s
    - **`done` (or `idle` with a completed summary + commit):**
      1. Verify the commit exists on `ticket/<nr>`, mark `[done]` in the ledger, and report the outcome to the user.
      2. **Merge into `<integration-branch>`:** Merge `ticket/<nr>` into `<integration-branch>` (`orchestrator/batch`) so downstream tickets get the completed code. If a merge conflict occurs, stop and report the conflict to the user rather than guessing.
-     3. **Unlock & advance:** Move any tickets whose blockers are now all `[done]` from **Blocked** into **Queue**, then reset finished worker contexts (`herdr agent send-keys "impl-<nr>" ctrl+c`, confirm shell prompt, or remove finished worktree and create a fresh `herdr worktree` from `<integration-branch>`) and dispatch as many newly unblocked tickets in parallel as free worker slots allow (up to 3-4).
+     3. **Close the ticket on the issue tracker:** Close `#<nr>` using the tracker workflow in `docs/agents/issue-tracker.md` (for GitHub: `gh issue close <nr> --comment "Implemented in <commit-sha> on branch ticket/<nr> (merged to orchestrator/batch)."`).
+     4. **Unlock & advance:** Move any tickets whose blockers are now all `[done]` from **Blocked** into **Queue**, then reset finished worker contexts (`herdr agent send-keys "impl-<nr>" ctrl+c`, confirm shell prompt, or remove finished worktree and create a fresh `herdr worktree` from `<integration-branch>`) and dispatch as many newly unblocked tickets in parallel as free worker slots allow (up to 3-4), each with its own background `herdr agent wait` watcher.
 
 ## 7. The Ledger
 
