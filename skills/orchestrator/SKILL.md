@@ -104,6 +104,10 @@ When a background `herdr agent wait` watcher finishes (or when the user says `st
 
 Keep the ledger in `.herdr/orchestrator.md` in the current repo (create `.herdr/` if needed). The ledger survives context compaction; your memory does not.
 
+**Resume vs Reset rule:**
+- If `.herdr/orchestrator.md` exists and still has active/open work (`[running]`, `[blocked]`, or non-empty `Queue` / `Blocked`), **resume** from it and keep updating it in place.
+- If the previous batch is 100% finished (no `[running]`, no `[blocked]`, empty `Queue` and `Blocked`) and a new batch starts, **archive** the finished ledger (e.g. `.herdr/orchestrator-archive-<YYYYMMDD-HHMM>.md`) and **reset** `.herdr/orchestrator.md` cleanly for the new batch.
+
 Format:
 
 ```markdown
