@@ -27,15 +27,21 @@ The mode stays on until the user says "stop orchestrating".
 - Dispatch work, update the ledger, report in 3-5 lines what was started, and end your turn immediately so the user stays unblocked.
 - Always pass `--no-focus` when creating worktrees or splitting panes so you never steal the user's focus.
 
-## 3. Ticket Queue & Agent Sizing
+## 3. Ticket Queue, Dependencies & Agent Sizing
 
-1. **Collect tickets:**
+1. **Collect tickets & dependency graph:**
    - If the user supplied ticket IDs (e.g. `#12 #13 #14 #15`), use that exact list.
-   - Otherwise, query open, unblocked tickets from the configured issue tracker (e.g. `gh issue list --label ready-for-agent --state open` or open issues in `.scratch/`), respecting any `blocked by` dependencies so only unblocked tickets enter the active queue.
-2. **Worker pool size:**
-   - Default to **max 3-4 parallel workers** (or fewer if fewer tickets exist, or the exact count the user requested).
-   - Assign tickets evenly (round-robin as workers finish).
-3. **Agent kind (`--kind`):**
+   - Otherwise, query open tickets from the configured issue tracker (e.g. `gh issue list --label ready-for-agent --state open` or open issues in `.scratch/`).
+   - Inspect `blocked by` relationships. Split tickets into:
+     - **Ready queue:** unblocked tickets that can start immediately.
+     - **Blocked list:** tickets waiting on one or more blockers (track `blocked by #X` in the ledger).
+2. **Integration branch (for batches / dependencies):**
+   - Create one integration branch from `<base-branch>` (e.g. `git branch orchestrator/batch <base-branch>`) at the start of the batch.
+   - Every worker worktree branches off `<integration-branch>` (`--base orchestrator/batch`). That way, once a blocker finishes and merges into `orchestrator/batch`, newly unblocked tickets start with the blocker's code already in place.
+3. **Worker pool size:**
+   - Default to **max 3-4 parallel workers** (or fewer if fewer unblocked tickets exist, or the exact count the user requested).
+   - Assign ready tickets evenly (round-robin as workers finish or new tickets unlock).
+4. **Agent kind (`--kind`):**
    - Default: `--kind agy`.
    - If the user asks for another kind (e.g. "odpal claude", "use claude", `--kind codex`, `--kind gemini`), use that `--kind` for new workers.
 
@@ -45,7 +51,7 @@ Each active ticket runs in its own Herdr worktree and branch so agents never col
 
 1. **Create a worktree workspace per worker:**
    ```bash
-   herdr worktree create --cwd "<repo-root>" --branch "ticket/<nr>" --base "<base-branch>" --label "ticket-<nr>" --no-focus
+   herdr worktree create --cwd "<repo-root>" --branch "ticket/<nr>" --base "<integration-branch>" --label "ticket-<nr>" --no-focus
    ```
    Parse `.result.workspace` (workspace ID) and `.result.root_pane` (pane ID) from the JSON output. Never guess IDs.
 2. **Start the agent in that pane:**
@@ -81,11 +87,9 @@ Because `herdr` does not push automatic notifications into your session, check s
    - **`working`:** Keep it in the ledger as `[running]`. Do not interrupt.
    - **`blocked`:** Surface the exact question or approval prompt to the user and mark `[blocked]` in the ledger. Do not answer approval dialogs on your own.
    - **`done` (or `idle` with a completed summary + commit):**
-     1. Verify the commit exists on `ticket/<nr>` if needed, mark `[done]` in the ledger, and report the outcome to the user.
-     2. **Mandatory context reset** before reusing a pane or starting the next ticket:
-        - Either close the finished worktree once its branch is ready (`herdr worktree remove --workspace <ws-id>` only after the user agrees or after confirming the branch/commit is safe in Git) and create a fresh `herdr worktree` for the next queued ticket, OR
-        - Stop the finished agent cleanly (`herdr agent send-keys "impl-<nr>" ctrl+c`, wait briefly, confirm shell prompt via `herdr agent list`) before starting a new agent process.
-     3. Dispatch the next unblocked ticket from the queue so workers stay evenly loaded.
+     1. Verify the commit exists on `ticket/<nr>`, mark `[done]` in the ledger, and report the outcome to the user.
+     2. **Merge into `<integration-branch>`:** Merge `ticket/<nr>` into `<integration-branch>` (`orchestrator/batch`) so downstream tickets get the completed code. If a merge conflict occurs, stop and report the conflict to the user rather than guessing.
+     3. **Unlock & advance:** Move any tickets whose blockers are now all `[done]` from **Blocked** into **Queue**, then reset finished worker contexts (`herdr agent send-keys "impl-<nr>" ctrl+c`, confirm shell prompt, or remove finished worktree and create a fresh `herdr worktree` from `<integration-branch>`) and dispatch as many newly unblocked tickets in parallel as free worker slots allow (up to 3-4).
 
 ## 7. The Ledger
 
@@ -97,8 +101,10 @@ Format:
 # Orchestrator Ledger
 
 - Base branch: `main`
+- Integration branch: `orchestrator/batch`
 - Default kind: `agy`
-- Queue: `#15`, `#16`
+- Queue: `#15`
+- Blocked: `#16 (by #12)`, `#17 (by #12, #13)`
 
 ## Workers
 - [running] impl-12 (agy, ws: w2, branch: ticket/12) - Implement auth middleware - started 11:50
@@ -110,13 +116,13 @@ When the user asks `status`, read `.herdr/orchestrator.md` (and refresh live sta
 
 ## 8. Batch Wrap-up (Commit vs Merge / PR)
 
-When all queued tickets are `[done]`:
-1. Summarize every completed `ticket/<nr>` branch, commit SHA, and test status.
+When all queued and blocked tickets are `[done]`:
+1. Summarize `<integration-branch>`, every completed `ticket/<nr>` branch, commit SHA, and test status.
 2. Ask the user how they want to land the batch:
-   - Merge `ticket/<nr>` branches into an integration branch or `main`, or
-   - Open PR(s) using the `pr` skill,
+   - Merge `<integration-branch>` into `<base-branch>` (e.g. `main`), or
+   - Open a PR for `<integration-branch>` (or per-ticket PRs) using the `pr` skill,
    - And clean up finished worktrees with `herdr worktree remove --workspace <ws-id>`.
-Never merge, push, or delete worktrees with uncommitted work without user confirmation.
+Never merge into `main`, push, or delete worktrees with uncommitted work without user confirmation.
 
 ## 9. Control Commands
 

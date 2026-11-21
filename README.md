@@ -5,7 +5,8 @@ Forked from [olivieropinotti/orchestrator-skill](https://github.com/olivieropino
 ## What it does
 
 - Turns the main session into a non-blocking dispatcher for pre-prepared tickets (GitHub/GitLab/local `.scratch/`).
-- Isolates each parallel worker in its own `herdr worktree` (`ticket/<nr>` branch) with `--no-focus`.
+- Isolates each parallel worker in its own `herdr worktree` (`ticket/<nr>` branch) off a shared integration branch (`orchestrator/batch`).
+- Respects `blocked by` dependencies: waits on blockers, merges finished blockers into `orchestrator/batch`, and dispatches newly unblocked tickets in parallel.
 - Runs `implement #<nr>` on each worker (`tdd`, typecheck/tests, `code-review`, commit on its own branch).
 - Uses `--kind agy` by default, or any supported Herdr agent kind (`claude`, `codex`, `gemini`, etc.) on request.
 - Tracks active workers, branches, and queued tickets in `.herdr/orchestrator.md`.
