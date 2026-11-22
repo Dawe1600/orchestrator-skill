@@ -58,6 +58,7 @@ Each active ticket runs in its own Herdr worktree and branch so agents never col
    herdr worktree create --cwd "<repo-root>" --branch "ticket/<nr>" --base "<integration-branch>" --label "ticket-<nr>" --no-focus
    ```
    Parse `.result.workspace` (workspace ID) and `.result.root_pane` (pane ID) from the JSON output. Never guess IDs.
+   - **Copy untracked env/config files (when needed):** Fresh Git worktrees omit gitignored runtime files (e.g. `.env`, `.env.local`, `.env.test`). If present in `<repo-root>` and required for tests/builds, copy them into the new worktree path before starting the agent.
 2. **Start the agent in that pane:**
    Name the agent `impl-<nr>` (lowercase `[a-z][a-z0-9_-]{0,31}`):
    - Pass any user-requested model or effort after `--` (for `agy`, check exact IDs with `agy models`, e.g. `-- --model gemini-4-hydrogen-medium --effort medium`).
@@ -80,7 +81,11 @@ A Herdr agent starts with a clean context and sees nothing of this chat. Every b
 - **Task:** Run the `implement` skill for ticket `#<nr>` (`implement #<nr>`), following `tdd`, running typecheck/tests, running `code-review`, and committing to your branch.
 - **Isolation:** "You are working in an isolated worktree on branch `ticket/<nr>`. Touch only files in this worktree. Do NOT switch to `main`, do NOT modify other worktrees, and do NOT push, merge, or open a PR."
 - **Done criteria:** Tests and typecheck pass, `code-review` findings addressed, changes committed on `ticket/<nr>`.
-- **Report shape:** End with a short summary: status (`done` / `blocked`), commit SHA, tests run, and any blockers.
+- **Report shape:** End with a short summary plus a single-line JSON payload inside `<orchestrator-result>` tags so the dispatcher can parse it reliably across agent CLIs:
+  ```xml
+  <orchestrator-result>{"status":"done","commit":"<sha>","tests":"pass","blockers":[]}</orchestrator-result>
+  ```
+  (`status`: `"done"` or `"blocked"`; `tests`: `"pass"`, `"fail"`, or `"skipped"`).
 
 ## 6. Monitoring, Closing Issues, Context Reset & Queue Advancement
 
@@ -92,11 +97,11 @@ When a background `herdr agent wait` watcher finishes (or when the user says `st
    herdr agent read "impl-<nr>" --source recent-unwrapped --lines 80
    ```
 3. **Handle each state:**
-   - **`working`:** Keep it in the ledger as `[running]`. Do not interrupt.
+   - **`working` (with hanging-process check):** Keep it in the ledger as `[running]` and do not interrupt active work. If a worker stays in `working` unusually long (or when running `status` / `sync`), inspect `herdr agent read` for `<orchestrator-result>` and check `git log -1` on `ticket/<nr>`. If both the completion tag and a new commit are already present, a child process (e.g. test server or MCP) is likely holding stdout open: send `ctrl+c` via `herdr agent send-keys "impl-<nr>" ctrl+c` and proceed as `done` (noting the forced exit).
    - **`blocked`:** Surface the exact question or approval prompt to the user and mark `[blocked]` in the ledger. Do not answer approval dialogs on your own.
-   - **`done` (or `idle` with a completed summary + commit):**
-     1. Verify the commit exists on `ticket/<nr>`, mark `[done]` in the ledger, and report the outcome to the user.
-     2. **Merge into `<integration-branch>`:** Merge `ticket/<nr>` into `<integration-branch>` (`orchestrator/batch`) so downstream tickets get the completed code. If a merge conflict occurs, stop and report the conflict to the user rather than guessing.
+   - **`done` (or `idle` with `<orchestrator-result>` / completed summary + commit):**
+     1. Verify the commit exists on `ticket/<nr>` and check `git status --porcelain` in the worker's worktree. If uncommitted work remains, handle or report it before merging; otherwise mark `[done]` in the ledger and report the outcome to the user.
+     2. **Merge into `<integration-branch>`:** Merge `ticket/<nr>` into `<integration-branch>` (`orchestrator/batch`) so downstream tickets get the completed code. If a merge conflict occurs, run `git merge --abort` immediately so `<integration-branch>` stays clean, and report the conflict to the user rather than guessing.
      3. **Close the ticket on the issue tracker:** Close `#<nr>` using the tracker workflow in `docs/agents/issue-tracker.md` (for GitHub: `gh issue close <nr> --comment "Implemented in <commit-sha> on branch ticket/<nr> (merged to orchestrator/batch)."`).
      4. **Unlock & advance:** Move any tickets whose blockers are now all `[done]` from **Blocked** into **Queue**, then reset finished worker contexts (`herdr agent send-keys "impl-<nr>" ctrl+c`, confirm shell prompt, or remove finished worktree and create a fresh `herdr worktree` from `<integration-branch>`) and dispatch as many newly unblocked tickets in parallel as free worker slots allow (up to 3-4), each with its own background `herdr agent wait` watcher.
 
