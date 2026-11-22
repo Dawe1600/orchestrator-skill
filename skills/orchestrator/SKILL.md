@@ -62,7 +62,7 @@ Each active ticket runs in its own Herdr worktree and branch so agents never col
 2. **Start the agent in that pane:**
    Name the agent `impl-<nr>` (lowercase `[a-z][a-z0-9_-]{0,31}`):
    - Pass any user-requested model or effort after `--` (for `agy`, check exact IDs with `agy models`, e.g. `-- --model gemini-4-hydrogen-medium --effort medium`).
-   - In isolated worktrees, pass autonomous execution flags by default unless the user opts out (e.g. `--mode auto` or `--dangerously-skip-permissions` for `agy` / `claude`):
+   - In isolated worktrees, pass autonomous execution flags by default unless the user opts out (e.g. `--mode auto` for `agy`, `--permission-mode auto` for `claude`; never `--dangerously-skip-permissions`, which the auto-mode classifier blocks):
    ```bash
    herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000 -- --mode auto --model <model-id> --effort <effort>
    ```
