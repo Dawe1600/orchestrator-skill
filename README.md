@@ -27,7 +27,8 @@ flowchart LR
 3. **Creates an integration branch** (`orchestrator/batch`) and spawns up to **3-4 parallel workers**, each in its own `herdr worktree` (`ticket/<nr>`) with `--no-focus`.
 4. **Runs `implement #<nr>`** on every worker (`tdd`, typecheck/tests, `code-review`, local commit on `ticket/<nr>`).
 5. **Tracks state in `.herdr/orchestrator.md`** and attaches a non-blocking background `herdr agent wait` watcher per worker so your main session stays responsive and wakes up automatically when a ticket finishes.
-6. **Merges finished blockers** into `orchestrator/batch`, **closes completed issues** on the tracker (`gh issue close`), **resets worker contexts** (`ctrl+c`), and **dispatches newly unblocked tickets** in parallel.
+6. **Merges every finished ticket** into `orchestrator/batch` in a dedicated merge worktree, resolves additive conflicts, runs build + tests as a gate after each merge, **closes completed issues** on the tracker (`gh issue close`), and **dispatches newly unblocked tickets** into fresh worktrees (one ticket = one worktree = one agent).
+7. **Helper scripts** (`scripts/dispatch.sh`, `scripts/merge.sh`, brief template `brief.md`) do the mechanical Herdr/Git work without `jq`, including auto-accepting the folder-trust prompt for freshly created worktrees.
 
 ---
 
@@ -68,9 +69,8 @@ Once active, control it with plain messages (**no leading `/`**):
 
 | Command | Effect |
 | :--- | :--- |
-| `status` / `sync` | Inspect `herdr agent list` + `herdr agent read`, update `.herdr/orchestrator.md`, merge finished blockers, reset contexts, and advance the queue |
-| `next` | Advance idle/finished workers to the next queued tickets |
-| `use <kind>` | Switch default `--kind` for new workers (`agy`, `claude`, `codex`, `gemini`) |
+| `status` / `sync` | Inspect `herdr agent list` + `herdr agent read`, update `.herdr/orchestrator.md`, merge finished tickets, and advance the queue |
+| `use <kind>` | Switch `--kind` for new workers (`agy`, `claude`, `codex`, `gemini`) |
 | `redirect <name> to ...` | Send a follow-up instruction to a running worker |
 | `stop <name>` / `stop all` | Interrupt worker(s) with `ctrl+c` and mark `[stopped]` |
 | `stop orchestrating` | Exit orchestrator mode |

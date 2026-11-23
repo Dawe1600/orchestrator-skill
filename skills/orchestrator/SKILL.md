@@ -1,151 +1,118 @@
 ---
 name: orchestrator
-description: "Dispatch pre-prepared tickets evenly across parallel agents in Herdr worktrees using Matt Pocock's implement skill. Keeps the main thread unblocked, tracks progress in a ledger, resets agent context between tickets, and reports status. Use when the user invokes /orchestrator, says 'orchestrate', 'rozdziel tickety', or asks to run implement across multiple tickets in Herdr."
+description: "Dispatch pre-prepared tickets evenly across parallel agents in Herdr worktrees using Matt Pocock's implement skill. Keeps the main thread unblocked, tracks progress in a ledger, merges finished tickets into an integration branch, and reports status. Use when the user invokes /orchestrator, says 'orchestrate', 'rozdziel tickety', or asks to run implement across multiple tickets in Herdr."
 ---
 
 # Orchestrator (Herdr + Matt Pocock `implement`)
 
-You are the dispatcher. You do not implement tickets yourself. You read the prepared ticket queue, spin up isolated Herdr worktrees, dispatch `implement #<nr>` evenly across worker agents, track state in a ledger, reset contexts between tickets, and keep the user informed without blocking the main thread.
+You are the dispatcher. You do not implement tickets yourself. You read the prepared ticket queue, spin up isolated Herdr worktrees, dispatch `implement #<nr>` across worker agents, merge finished work into the integration branch, track state in a ledger, and keep the user informed without blocking the main thread.
 
 The mode stays on until the user says "stop orchestrating".
 
+Commands below are Bash (Git Bash on Windows). Helper scripts live in `~/.claude/skills/orchestrator/scripts/` (`$S` below); run them from the repo. Without the scripts: `jq` may be missing (parse Herdr JSON with `grep -oE` or `node -e`), and capture Herdr output in a variable instead of piping it, since Herdr panics when the reader closes the pipe.
+
 ## 1. Preconditions
 
-1. **Verify Herdr environment:**
-   Check that you are running inside a Herdr-managed pane:
-   ```bash
-   test "${HERDR_ENV:-}" = 1
-   ```
-   (On PowerShell: `if ($env:HERDR_ENV -ne "1") { ... }`). If not inside Herdr, tell the user and stop.
-2. **Verify repo readiness:**
-   - Confirm this is a Git repository and check the base branch (`git branch --show-current`).
-   - Check `docs/agents/issue-tracker.md` to see how tickets are tracked (GitHub `gh`, GitLab `glab`, or `.scratch/`). If missing, tell the user to run `setup-matt-pocock-skills` first and stop.
+1. **Herdr:** `test "${HERDR_ENV:-}" = 1`. If not inside Herdr, tell the user and stop.
+2. **Repo:** confirm a Git repo and note the base branch (`git branch --show-current`).
+3. **Tracker:** read `docs/agents/issue-tracker.md` for how tickets and blockers are tracked. If missing, tell the user to run `setup-matt-pocock-skills` first and stop.
 
 ## 2. The One Rule: Never Block the Main Thread
 
-- Never wait synchronously for an agent to finish a ticket. Never run a blocking foreground `herdr agent wait` or `herdr agent prompt --wait` that stalls your turn.
-- Instead, after dispatching each worker with `herdr agent prompt` (no `--wait`), launch a **background watcher** (`run_in_background: true` in Claude Code / `WaitMsBeforeAsync: 500` in Antigravity) for that worker:
-  - Bash: `herdr agent wait "impl-<nr>" --until working --timeout 15000 >/dev/null 2>&1; herdr agent wait "impl-<nr>"`
-  - PowerShell: `herdr agent wait "impl-<nr>" --until working --timeout 15000 | Out-Null; herdr agent wait "impl-<nr>"`
-- This background command wakes you up automatically the instant the worker finishes (`done`/`idle`) or hits a question (`blocked`), while keeping your main thread free so the user can keep talking to you.
-- Update the ledger, report in 3-5 lines what was started, and end your turn immediately after dispatching.
-- Always pass `--no-focus` when creating worktrees or splitting panes so you never steal the user's focus.
+- Dispatch without waiting (`dispatch.sh`, Section 4), then run the `watcher:` command it prints as a **background watcher** (`run_in_background: true`), one per worker.
+- The watcher wakes you when the worker settles (`done`/`idle`) or asks something (`blocked`), while the user can keep talking to you.
+- After dispatching: update the ledger, report in 3-5 lines, end your turn.
+- Pass `--no-focus` when creating worktrees or panes.
 
 ## 3. Ticket Queue, Dependencies & Agent Sizing
 
-1. **Collect tickets & dependency graph:**
-   - If the user supplied ticket IDs (e.g. `#12 #13 #14 #15`), use that exact list.
-   - Otherwise, query open tickets from the configured issue tracker (e.g. `gh issue list --label ready-for-agent --state open` or open issues in `.scratch/`).
-   - Inspect `blocked by` relationships. Split tickets into:
-     - **Ready queue:** unblocked tickets that can start immediately.
-     - **Blocked list:** tickets waiting on one or more blockers (track `blocked by #X` in the ledger).
-2. **Integration branch (for batches / dependencies):**
-   - Create one integration branch from `<base-branch>` (e.g. `git branch orchestrator/batch <base-branch>`) at the start of the batch.
-   - Every worker worktree branches off `<integration-branch>` (`--base orchestrator/batch`). That way, once a blocker finishes and merges into `orchestrator/batch`, newly unblocked tickets start with the blocker's code already in place.
-3. **Worker pool size:**
-   - Default to **max 3-4 parallel workers** (or fewer if fewer unblocked tickets exist, or the exact count the user requested).
-   - Assign ready tickets evenly (round-robin as workers finish or new tickets unlock).
-4. **Agent kind (`--kind`):**
-   - Default: `--kind agy`.
-   - If the user asks for another kind (e.g. "odpal claude", "use claude", `--kind codex`, `--kind gemini`), use that `--kind` for new workers.
+1. **Tickets & dependency graph:**
+   - Use the ticket IDs the user gave; for a spec, its child tickets; otherwise open `ready-for-agent` tickets.
+   - Read blockers the way the **Blocking** section of `docs/agents/issue-tracker.md` describes (on GitHub these are native dependencies: `gh api repos/<owner>/<repo>/issues/<nr>/dependencies/blocked_by --jq '[.[].number]'`, not text in the body).
+   - Split into **Ready queue** and **Blocked list** (`#X (by #A, #B)`). Dispatch blockers first when choosing among ready tickets.
+2. **Integration branch:** `git branch orchestrator/batch <base-branch>` at batch start. Every worker branches off the current `orchestrator/batch`, so unblocked tickets start with their blockers' code.
+3. **Pool size:** max 3-4 parallel workers, or the count the user names.
+4. **Agent kind:** the kind, model and effort the user names; otherwise the ones recorded in the most recent `.herdr/orchestrator-archive-*.md`; otherwise `agy`. Record them in the ledger.
 
-## 4. Workspace Isolation & Dispatching
+## 4. Dispatching
 
-Each active ticket runs in its own Herdr worktree and branch so agents never collide on files.
+**One ticket = one worktree = one agent.** A worker is never reused for a second ticket; a fresh worktree off the current `orchestrator/batch` is the context reset.
 
-1. **Create a worktree workspace per worker:**
-   ```bash
-   herdr worktree create --cwd "<repo-root>" --branch "ticket/<nr>" --base "<integration-branch>" --label "ticket-<nr>" --no-focus
-   ```
-   Parse `.result.workspace` (workspace ID) and `.result.root_pane` (pane ID) from the JSON output. Never guess IDs.
-   - **Copy untracked env/config files (when needed):** Fresh Git worktrees omit gitignored runtime files (e.g. `.env`, `.env.local`, `.env.test`). If present in `<repo-root>` and required for tests/builds, copy them into the new worktree path before starting the agent.
-2. **Start the agent in that pane:**
-   Name the agent `impl-<nr>` (lowercase `[a-z][a-z0-9_-]{0,31}`):
-   - Pass any user-requested model or effort after `--` (for `agy`, check exact IDs with `agy models`, e.g. `-- --model gemini-4-hydrogen-medium --effort medium`).
-   - In isolated worktrees, pass autonomous execution flags by default unless the user opts out (e.g. `--mode auto` for `agy`, `--permission-mode auto` for `claude`; never `--dangerously-skip-permissions`, which the auto-mode classifier blocks):
-   ```bash
-   herdr agent start "impl-<nr>" --kind <kind> --pane "<pane-id>" --timeout 45000 -- --mode auto --model <model-id> --effort <effort>
-   ```
-   - **Auto-accept worktree folder trust:** If `herdr agent start` returns `agent_not_ready`, inspect `herdr agent read "impl-<nr>" --source visible --lines 30`. If it shows the folder-trust prompt (`Do you trust the contents of this project?`) for the worktree you just created from this trusted repository, accept it automatically (`herdr agent send-keys "impl-<nr>" enter`) and wait until `impl-<nr>` becomes `idle` before sending the brief.
-3. **Send the brief via `herdr agent prompt` (no `--wait`) and start a background watcher:**
-   ```bash
-   herdr agent prompt "impl-<nr>" "<brief>"
-   ```
-   Then immediately start the background `herdr agent wait` watcher (Section 2) so you are notified automatically when `impl-<nr>` settles.
-4. **Update the ledger** and reply to the user in 3-5 lines (agent name, ticket `#<nr>`, branch `ticket/<nr>`, kind).
+1. **Dispatch** with `bash "$S/dispatch.sh" <nr> <kind> --spec <spec-nr> --notes "<notes>" -- <agent args>`. It creates the worktree `ticket/<nr>` off `orchestrator/batch`, copies `.env*`, starts agent `impl-<nr>`, accepts the folder-trust prompt, sends the brief from `brief.md` (Section 5) and prints `ws=… pane=… agent=… path=…` plus the watcher command. On failure it prints the error and the pane screen; anything other than folder trust (login, update, unknown dialog) is the user's to answer.
+   - Agent args are autonomous flags plus model and effort: `--mode auto` for `agy`; `--permission-mode auto --model <model-id> --effort <effort>` for `claude` (`--dangerously-skip-permissions` is blocked by the auto-mode classifier).
+2. **Watcher** from the printed line (Section 2).
+3. **Ledger** + 3-5 line reply (agent, ticket, branch, kind).
 
-## 5. Write a Brief
+## 5. The Brief
 
-A Herdr agent starts with a clean context and sees nothing of this chat. Every brief must include:
+The worker sees nothing of this chat. `brief.md` carries the fixed parts: task (`implement #<nr>` with `tdd`, build/test, `mattpocock-skills:code-review`, commit), parent spec, isolation, shared files, done criteria and the `<orchestrator-result>` line with its fields (`status`, `commit`, `tests`, `review`, `manual`, `blockers`). Edit the template when the review skill or result format changes; pass `--template <file>` for a one-off brief.
 
-- **Task:** Run the `implement` skill for ticket `#<nr>` (`implement #<nr>`), following `tdd`, running typecheck/tests, running `code-review`, and committing to your branch.
-- **Isolation:** "You are working in an isolated worktree on branch `ticket/<nr>`. Touch only files in this worktree. Do NOT switch to `main`, do NOT modify other worktrees, and do NOT push, merge, or open a PR."
-- **Done criteria:** Tests and typecheck pass, `code-review` findings addressed, changes committed on `ticket/<nr>`.
-- **Report shape:** End with a short summary plus a single-line JSON payload inside `<orchestrator-result>` tags so the dispatcher can parse it reliably across agent CLIs:
-  ```xml
-  <orchestrator-result>{"status":"done","commit":"<sha>","tests":"pass","blockers":[]}</orchestrator-result>
-  ```
-  (`status`: `"done"` or `"blocked"`; `tests`: `"pass"`, `"fail"`, or `"skipped"`).
+`--notes` carries what only you know, in one paragraph:
 
-## 6. Monitoring, Closing Issues, Context Reset & Queue Advancement
+- **Repo specifics** the worker would otherwise trip on: dependency install, lockfile noise it must not commit, commit-message rules from the user's CLAUDE.md.
+- **Cross-ticket notes:** when this ticket consumes what parallel tickets produce (e.g. CSP hashes of inline scripts), say so and ask for values derived at build time rather than hardcoded.
 
-When a background `herdr agent wait` watcher finishes (or when the user says `status`, `sync`, or `next`):
+## 6. Monitoring & Merging
 
-1. Run `herdr agent list` to inspect live worker states (`working`, `idle`, `done`, `blocked`, `unknown`).
-2. For any worker in `done`, `idle`, or `blocked`, read its recent output:
-   ```bash
-   herdr agent read "impl-<nr>" --source recent-unwrapped --lines 80
-   ```
-3. **Handle each state:**
-   - **`working` (with hanging-process check):** Keep it in the ledger as `[running]` and do not interrupt active work. If a worker stays in `working` unusually long (or when running `status` / `sync`), inspect `herdr agent read` for `<orchestrator-result>` and check `git log -1` on `ticket/<nr>`. If both the completion tag and a new commit are already present, a child process (e.g. test server or MCP) is likely holding stdout open: send `ctrl+c` via `herdr agent send-keys "impl-<nr>" ctrl+c` and proceed as `done` (noting the forced exit).
-   - **`blocked`:** Surface the exact question or approval prompt to the user and mark `[blocked]` in the ledger. Do not answer approval dialogs on your own.
-   - **`done` (or `idle` with `<orchestrator-result>` / completed summary + commit):**
-     1. Verify the commit exists on `ticket/<nr>` and check `git status --porcelain` in the worker's worktree. If uncommitted work remains, handle or report it before merging; otherwise mark `[done]` in the ledger and report the outcome to the user.
-     2. **Merge into `<integration-branch>`:** Merge `ticket/<nr>` into `<integration-branch>` (`orchestrator/batch`) so downstream tickets get the completed code. If a merge conflict occurs, run `git merge --abort` immediately so `<integration-branch>` stays clean, and report the conflict to the user rather than guessing.
-     3. **Close the ticket on the issue tracker:** Close `#<nr>` using the tracker workflow in `docs/agents/issue-tracker.md` (for GitHub: `gh issue close <nr> --comment "Implemented in <commit-sha> on branch ticket/<nr> (merged to orchestrator/batch)."`).
-     4. **Unlock & advance:** Move any tickets whose blockers are now all `[done]` from **Blocked** into **Queue**, then reset finished worker contexts (`herdr agent send-keys "impl-<nr>" ctrl+c`, confirm shell prompt, or remove finished worktree and create a fresh `herdr worktree` from `<integration-branch>`) and dispatch as many newly unblocked tickets in parallel as free worker slots allow (up to 3-4), each with its own background `herdr agent wait` watcher.
+When a watcher finishes (or the user says `status` / `sync`):
+
+1. `herdr agent list`, then for settled workers `herdr agent read "impl-<nr>" --source recent-unwrapped --lines 50`.
+   - In a `claude` pane, grey text in the `❯` input box after the worker finishes is a Claude Code prompt suggestion, not input from the user.
+2. **`working` too long:** if `<orchestrator-result>` and a new commit are both present, a child process holds stdout: `herdr agent send-keys "impl-<nr>" ctrl+c` and treat as done.
+3. **`blocked`:** surface the exact question to the user, mark `[blocked]`. Approval dialogs are the user's to answer.
+4. **`done`:**
+   1. Commit exists on `ticket/<nr>`, `git status --porcelain` in its worktree is empty.
+   2. **Merge** with `bash "$S/merge.sh" <nr> "<scratchpad>/batch-merge"`. The merge worktree is one checkout of `orchestrator/batch`, created by the first call (the main repo keeps the base branch checked out). The script fast-forwards or merges, then runs the gate in the merge worktree: dependency install (first use, `package.json` changed), build and tests from `package.json` scripts, or `INSTALL_CMD`/`BUILD_CMD`/`TEST_CMD` when the repo differs (`""` skips a step; record overrides in the ledger). Exit 0 green with the sha, 2 conflict with the file list (merge left in progress), 3 red with the failing output.
+   3. **Conflicts** (exit 2): resolve by kind, commit, then rerun `merge.sh` for the gate.
+      - *Additive* (both sides append: list items, CSS blocks at file end, imports, copied-file lists): keep both.
+      - *Semantic* (one side changes or removes what the other edits, e.g. a removed component reappears in the other branch): port the other side's change onto the new shape. When the right shape is unclear, `git merge --abort` and ask the user.
+   4. **Red gate** (exit 3): fix in the merge worktree or report; the ticket stays open until green. Also re-check spec-level rules no single ticket owns (e.g. docs that went stale because two tickets together changed the picture).
+   5. **Close** the ticket per the tracker doc (`gh issue close <nr> --comment "Implemented in <sha> on branch ticket/<nr> (merged to orchestrator/batch)."`). Stop the worker (`herdr agent send-keys "impl-<nr>" ctrl+c`).
+   6. **Advance:** move tickets whose blockers are all `[done]` into the queue; dispatch into free slots (Section 4), each with its watcher.
+5. Report per merged ticket: commit, test count, `review` value if not `skill`, and every `manual` item.
 
 ## 7. The Ledger
 
-Keep the ledger in `.herdr/orchestrator.md` in the current repo (create `.herdr/` if needed). The ledger survives context compaction; your memory does not.
+`.herdr/orchestrator.md` in the repo. It survives context compaction; your memory does not.
 
-**Resume vs Reset rule:**
-- If `.herdr/orchestrator.md` exists and still has active/open work (`[running]`, `[blocked]`, or non-empty `Queue` / `Blocked`), **resume** from it and keep updating it in place.
-- If the previous batch is 100% finished (no `[running]`, no `[blocked]`, empty `Queue` and `Blocked`) and a new batch starts, **archive** the finished ledger (e.g. `.herdr/orchestrator-archive-<YYYYMMDD-HHMM>.md`) and **reset** `.herdr/orchestrator.md` cleanly for the new batch.
-
-Format:
+- Active work in it (`[running]`, `[blocked]`, non-empty Queue/Blocked) → **resume** in place.
+- Previous batch fully done → **archive** to `.herdr/orchestrator-archive-<YYYYMMDD>-<name>.md` and start fresh.
 
 ```markdown
 # Orchestrator Ledger
 
-- Base branch: `main`
-- Integration branch: `orchestrator/batch`
-- Default kind: `agy`
-- Queue: `#15`
-- Blocked: `#16 (by #12)`, `#17 (by #12, #13)`
+- Spec: #15
+- Base branch: `v2`
+- Integration branch: `orchestrator/batch`; merge worktree: <path>
+- Kind: `claude` (claude-opus-5-5, effort low, --permission-mode auto), max 4
+- Queue: `#21`
+- Blocked: `#23 (by #18, #19)`
 
 ## Workers
-- [running] impl-12 (agy, ws: w2, branch: ticket/12) - Implement auth middleware - started 11:50
-- [done]    impl-13 (agy, ws: w3, branch: ticket/13) - Add rate limiter (commit a1b2c3d, tests pass) - 12:05
-- [blocked] impl-14 (claude, ws: w4, branch: ticket/14) - Needs decision on schema migration - 12:08
+- [running] impl-18 (ws: wX, ticket/18) - Ikony SVG
+- [done]    impl-16 (ws: wV, ticket/16) - Treść bez JS (553f32d, 56/56, closed)
+- [blocked] impl-14 (ws: w4, ticket/14) - Needs decision on schema migration
+
+## Notes
+- Manual checks collected from workers; conflicts resolved and how.
 ```
 
-When the user asks `status`, read `.herdr/orchestrator.md` (and refresh live states via `herdr agent list` if active workers exist) before answering.
+## 8. Batch Wrap-up
 
-## 8. Batch Wrap-up (Commit vs Merge / PR)
+When every ticket is `[done]`:
 
-When all queued and blocked tickets are `[done]`:
-1. Summarize `<integration-branch>`, every completed `ticket/<nr>` branch, commit SHA, and test status.
-2. Ask the user how they want to land the batch:
-   - Merge `<integration-branch>` into `<base-branch>` (e.g. `main`), or
-   - Open a PR for `<integration-branch>` (or per-ticket PRs) using the `pr` skill,
-   - And clean up finished worktrees with `herdr worktree remove --workspace <ws-id>`.
-Never merge into `main`, push, or delete worktrees with uncommitted work without user confirmation.
+1. Summarize: integration branch head, each ticket's commit, final test count, collected `manual` items, any `review` other than `skill`.
+2. Ask how to land it: fast-forward/merge into the base branch, or a PR (`pr` skill). Ask whether to close the parent spec. Merging into `main`, pushing and deploying wait for the user's explicit yes.
+3. **Clean up** after landing:
+   1. Every `ticket-*` worktree and the merge worktree has an empty `git status --porcelain`.
+   2. `herdr worktree remove --workspace <ws-id>` per ticket; `git worktree remove` for the merge worktree; `git worktree prune`.
+   3. `git branch -d ticket/<nr>...` and `orchestrator/batch` (merged, so `-d` succeeds).
+   4. Archive the ledger (Section 7).
+   5. Dependency install in the main repo if the batch changed `package.json`.
 
 ## 9. Control Commands
 
-- `status` / `sync`: Check `herdr agent list` + `herdr agent read` for finished/blocked workers, update `.herdr/orchestrator.md`, advance the queue if tickets remain, and report concisely.
-- `next`: Advance any finished worker to the next queued ticket (with context reset).
-- `stop <name>` / `stop all`: Send `ctrl+c` via `herdr agent send-keys <name> ctrl+c` and mark `[stopped]` in the ledger.
-- `redirect <name> to <instruction>`: Send the updated instruction with `herdr agent prompt <name> "<instruction>"`.
-- `use <kind>`: Switch the default `--kind` (e.g. `claude`, `agy`, `codex`) for subsequent spawns.
+- `status` / `sync`: Section 6, then a short report.
+- `stop <name>` / `stop all`: `herdr agent send-keys <name> ctrl+c`, mark `[stopped]`.
+- `redirect <name> to <instruction>`: `herdr agent prompt <name> "<instruction>"`.
+- `use <kind>`: switch kind for subsequent spawns and record it in the ledger.
